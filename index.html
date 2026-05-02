@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DarkBasic .DBO Deep Parser</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #080808; color: #eee; font-family: 'Inter', sans-serif; }
+        canvas { display: block; }
+        .ui-panel {
+            position: absolute;
+            background: rgba(15, 15, 15, 0.9);
+            backdrop-filter: blur(10px);
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 16px;
+            z-index: 10;
+        }
+        #sidebar { top: 20px; left: 20px; width: 320px; max-height: calc(100vh - 40px); overflow-y: auto; }
+        #debug-log { bottom: 20px; right: 20px; width: 400px; height: 200px; font-family: monospace; font-size: 10px; overflow-y: scroll; background: black; border: 1px solid #444; color: #0f0; }
+        .log-entry { padding: 2px 5px; border-bottom: 1px solid #222; }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar" class="ui-panel">
+        <h1 class="text-xl font-bold text-blue-400 mb-4 tracking-tight">DBO REAPER PARSER</h1>
+        
+        <div class="mb-4">
+            <label class="block text-[10px] font-bold text-gray-500 uppercase mb-2">Select .DBO File</label>
+            <input type="file" id="fileInput" accept=".dbo" class="block w-full text-sm text-gray-400
+                file:mr-4 file:py-2 file:px-4 file:rounded file:border-0
+                file:text-xs file:font-semibold file:bg-blue-600 file:text-white
+                hover:file:bg-blue-700 cursor-pointer">
+        </div>
+
+        <div id="stats" class="text-[11px] space-y-1 mb-4 p-3 bg-blue-900/20 rounded border border-blue-800/40">
+            <div class="flex justify-between"><span>Found Markers:</span><span id="stat-markers" class="text-white">0</span></div>
+            <div class="flex justify-between"><span>Meshes Loaded:</span><span id="stat-meshes" class="text-green-400">0</span></div>
+        </div>
+
+        <div id="hierarchy" class="text-[11px]">
+            <h3 class="font-bold text-gray-500 mb-2 uppercase">Detected Parts</h3>
+            <div id="chunkList" class="space-y-1 opacity-80"></div>
+        </div>
+    </div>
+
+    <div id="debug-log"></div>
+
+    <div class="absolute bottom-8 left-1/2 -translate-x-1/2 flex gap-3">
+        <button onclick="resetCamera()" class="bg-gray-800 hover:bg-gray-700 px-5 py-2 rounded text-xs font-bold uppercase border border-white/10">Center View</button>
+        <button onclick="toggleWireframe()" class="bg-gray-800 hover:bg-gray-700 px-5 py-2 rounded text-xs font-bold uppercase border border-white/10">Wireframe</button>
+        <button onclick="togglePoints()" class="bg-gray-800 hover:bg-gray-700 px-5 py-2 rounded text-xs font-bold uppercase border border-white/10">Point Cloud</button>
+    </div>
+
+    <script>
+        let scene, camera, renderer, controls, modelGroup;
+        let isWireframe = false;
+        let showPoints = false;
+
+        function log(msg, color = "#0f0") {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.style.color = color;
+            entry.innerText = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            const container = document.getElementById('debug-log');
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x080808);
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000000);
+            camera.position.set(100, 100, 100);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+            
+            const sun = new THREE.DirectionalLight(0xffffff, 1.0);
+            sun.position.set(100, 200, 100);
+            scene.add(sun);
+
+            modelGroup = new THREE.Group();
+            scene.add(modelGroup);
+
+            document.getElementById('fileInput').addEventListener('change', handleFile);
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+            animate();
+            log("Ready to scan for Reaper meshes.");
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function handleFile(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            log(`Opening ${file.name}...`, "#3b82f6");
+            const reader = new FileReader();
+            reader.onload = (ev) => parse(ev.target.result);
+            reader.readAsArrayBuffer(file);
+        }
+
+        function parse(buffer) {
+            const uint8 = new Uint8Array(buffer);
+            const view = new DataView(buffer);
+            let markerCount = 0;
+            
+            while(modelGroup.children.length > 0) modelGroup.remove(modelGroup.children[0]);
+            document.getElementById('chunkList').innerHTML = '';
+
+            // We look for the "f@" marker (0x66 0x40) which is very unique to your file
+            // It appears right before large blocks of floats
+            for (let i = 0; i < uint8.length - 20; i++) {
+                if (uint8[i] === 0x66 && uint8[i+1] === 0x40) {
+                    markerCount++;
+                    log(`Detected potential geometry at offset ${i}`, "#f472b6");
+                    
+                    // After the f@ marker, we scan for the best vertex stride
+                    const success = attemptSweep(view, i + 2);
+                    if (success) {
+                        const item = document.createElement('div');
+                        item.className = 'p-1 border-b border-white/5 text-blue-300';
+                        item.innerText = `Part Found at ${i}`;
+                        document.getElementById('chunkList').appendChild(item);
+                    }
+                }
+            }
+
+            document.getElementById('stat-markers').innerText = markerCount;
+            document.getElementById('stat-meshes').innerText = modelGroup.children.length;
+            
+            if (modelGroup.children.length > 0) {
+                log(`Loaded ${modelGroup.children.length} meshes.`, "#4ade80");
+                resetCamera();
+            } else {
+                log("No meshes found. File might be encrypted or compressed.", "#f87171");
+            }
+        }
+
+        function attemptSweep(view, start) {
+            // Test common vertex strides found in DarkBasic
+            const strides = [32, 36, 40, 48, 12, 64]; 
+            
+            for (let stride of strides) {
+                const positions = [];
+                let p = start + 6; // Small skip for counts/headers
+                
+                // Collect 50 points to test validity
+                for (let j = 0; j < 50; j++) {
+                    let offset = p + (j * stride);
+                    if (offset + 12 > view.byteLength) break;
+                    
+                    const x = view.getFloat32(offset, true);
+                    const y = view.getFloat32(offset + 4, true);
+                    const z = view.getFloat32(offset + 8, true);
+
+                    if (isNaN(x) || isNaN(y) || isNaN(z)) break;
+                    if (Math.abs(x) > 10000 || Math.abs(y) > 10000 || Math.abs(z) > 10000) break;
+                    
+                    positions.push(x, y, z);
+                }
+
+                if (positions.length > 30) {
+                    log(`Stride ${stride} looks valid. Extracting...`, "#4ade80");
+                    extractMesh(view, start + 6, stride);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function extractMesh(view, dataStart, stride) {
+            const positions = [];
+            let p = dataStart;
+            
+            // Extract as many vertices as possible until data becomes invalid
+            while (p + 12 <= view.byteLength) {
+                const x = view.getFloat32(p, true);
+                const y = view.getFloat32(p + 4, true);
+                const z = view.getFloat32(p + 8, true);
+
+                if (isNaN(x) || isNaN(y) || isNaN(z)) break;
+                if (Math.abs(x) > 20000 || Math.abs(y) > 20000 || Math.abs(z) > 20000) break;
+
+                positions.push(x, y, z);
+                p += stride;
+                if (positions.length > 15000) break; // Safety cap
+            }
+
+            if (positions.length > 9) {
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+                geo.computeVertexNormals();
+
+                const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ 
+                    color: 0x888888, 
+                    side: THREE.DoubleSide,
+                    wireframe: isWireframe
+                }));
+                
+                const points = new THREE.Points(geo, new THREE.PointsMaterial({ color: 0x00ff00, size: 0.5 }));
+                points.visible = showPoints;
+                mesh.add(points);
+                
+                modelGroup.add(mesh);
+            }
+        }
+
+        function resetCamera() {
+            const box = new THREE.Box3().setFromObject(modelGroup);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z) || 10;
+            
+            camera.position.set(center.x + maxDim * 1.5, center.y + maxDim * 1.5, center.z + maxDim * 1.5);
+            camera.lookAt(center);
+            controls.target.copy(center);
+        }
+
+        function toggleWireframe() {
+            isWireframe = !isWireframe;
+            modelGroup.traverse(c => { if(c.isMesh) c.material.wireframe = isWireframe; });
+        }
+
+        function togglePoints() {
+            showPoints = !showPoints;
+            modelGroup.traverse(c => { if(c instanceof THREE.Points) c.visible = showPoints; });
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
