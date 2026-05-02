@@ -1,6 +1,8 @@
 # eDBO
 GameGuru Classic encrypted DarkBasic object decryptor.
 
+[Screenshot 2026-05-02 203831.png]
+
 # Changes
 You can change the logic based on your desired encrypted DBO, so yeah.
 
