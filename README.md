@@ -16,3 +16,8 @@ You can change the logic based on your desired encrypted DBO, so yeah.
 # Warning
 Do not attempt to use this tool to extract game models and use them. It is _illegal_ and *unfair*.
 I am not responsible if you go to jail (lol).
+
+
+# PYTHON VERSION
+- Needed:
+pyopengl, pyopengltk, numpy, tkinter
